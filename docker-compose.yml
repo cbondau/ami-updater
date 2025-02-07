@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  localstack:
+    image: localstack/localstack:3.4  # Published on April 2024
+    environment:
+      - EDGE_PORT=4566
+      - AWS_DEFAULT_REGION=ap-southeast-2
+      - SERVICES=ec2,ssm,lambda,scheduler,events
+      - EAGER_SERVICE_LOADING=1
+      - DATA_DIR=/tmp/localstack/data
+    ports:
+      - '4566-4583:4566-4583'
