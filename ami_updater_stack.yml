@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "This stack contains resources required to trigger event based AMI updates"
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Description: "[Required] Unique application name"
+    AllowedPattern: ".+"
+
+  DefaultAmiId:
+    Type: String
+    Description: Default AMI ID
+
+  EnvironmentName:
+    Type: String
+    Description: "[Required] Name of the environment"
+    AllowedValues:
+      - "tbv"
+      - "stg"
+      - "prod"
+
+  SourceAWSAccountId:
+    Type: String
+    Description: SOE account that shares AMIs
+    Default: '123456789'
+
+  OsPlatform:
+    Type: String
+    Description: The application's operating system platform
+    Default: red_hat
+    AllowedValues: [red_hat, windows_core, windows_desktop]
+
+#  RhelMajorVersion:
+#    Type: String
+#    Description: Major version of RHEL
+#    Default: '8'
+#
+#  WindowsCoreMajorVersion:
+#    Type: String
+#    Description: Major version of Windows Core
+#    Default: '19'
+#
+#  WindowsDesktopMajorVersion:
+#    Type: String
+#    Description: Major version of Windows Desktop
+#    Default: '19'
+
+  PipelineProvider:
+    Type: String
+    Description: Provider for the pipeline
+    Default: CodePipeline
+    AllowedValues: [CodePipeline, GitHub]
+
+  DataClassification:
+    Type: String
+    Description: "Data Classification"
+    Default: GroupUse
+    AllowedValues: [GroupUse, Public, Confidential, CustomerPersonal, HighlyProtected]
+
+  ArtifactsBucketName:
+    Type: String
+    Description: Name of the artifacts bucket created by prerequisites stack
+
+  AmiUpdaterLambdaIamRoleArn:
+    Type: String
+    Description: ARN of the IAM role to be used by the AMI updater Lambda function
+
+  AmiPollerLambdaIamRoleArn:
+    Type: String
+    Description: ARN of the IAM role to be used by the AMI poller Lambda function
+
+  DeploymentPipelineName:
+    Type: String
+    Description: Name of the deployment code pipeline that the AMI Updater Lambda will start
+
+Conditions:
+  IsSupportedRegion: !Equals
+    - !Sub ${AWS::Region}
+    - ap-southeast-2
+  IsProd: !Equals
+    - !Ref Environment
+    - prod
+
+Resources:
+  AmiIdSsmParameter:
+    Type: AWS::SSM::Parameter
+    Condition: IsSupportedRegion
+    Properties:
+      Name: !Sub '/${ApplicationName}/${EnvironmentName}/ami-id'
+      Description: 'The latest AMI id to be used for application EC2 Instances'
+      Type: String
+      Value: !Ref DefaultAmiId
+      Tags:
+        DataClassification: !Ref DataClassification
+
+  DeploymentS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-${EnvironmentName}-artefactsbucket'
+
+  ScheduleForAmiPollerLambdaFunction:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Triggers the ami_poller Lambda function at regular intervals
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Name: !Sub '${ApplicationName}-${EnvironmentName}-ami-updater-trigger'
+      ScheduleExpression: rate(15 minutes)
+      ScheduleExpressionTimezone: Australia/Melbourne
+      State: ENABLED
+      Target:
+        Arn: !GetAtt AmiPollerLambdaFunction.Arn
+        RoleArn: !Ref AmiPollerLambdaArn
+
+  AmiPollerLambdaFunction:
+    Condition: IsSupportedRegion
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: ami_poller.handler
+      Role: !Ref AmiPollerLambdaArn
+      Code:
+        # S3Bucket: !Ref DeploymentS3Bucket
+        S3Bucket: !Ref ArtifactsBucketName
+        S3Key: ami_poller.zip
+      Runtime: python3.12
+      Timeout: 5
+      Environment:
+        Variables:
+          AMI_SSM_PARAMETER_NAME: !Ref AmiIdSsmParameter
+          APPLICATION_NAME: !Ref ApplicationName
+          DEPLOYMENT_SCHEDULE_IN_DAYS: !If [ IsProd, '8', '0' ]
+          ENVIRONMENT: !Ref EnvironmentName
+          OS_PLATFORM: !Ref OsPlatform
+          LAMBDA_AMI_UPDATER_ROLE_ARN: !Ref AmiUpdaterLambdaIamRoleArn
+          LAMBDA_AMI_UPDATER_FUNCTION_ARN: !GetAtt AmiUpdaterLambdaFunction.Arn
+          SOURCE_AWS_ACCOUNT_ID: !Ref SourceAWSAccountId
+
+  AmiUpdaterLambdaFunction:
+    Condition: IsSupportedRegion
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: ami_updater.handler
+      Role: !Ref AmiUpdaterLambdaArn
+      Code:
+        # S3Bucket: !Ref DeploymentS3Bucket
+        S3Bucket: !Ref ArtifactsBucketName
+        S3Key: ami_updater.zip
+      Runtime: python3.12
+      Timeout: 5
+      Environment:
+        Variables:
+          AMI_SSM_PARAMETER_NAME: !Ref AmiIdSsmParameter
+          APPLICATION_NAME: !Ref ApplicationName
+          ENVIRONMENT: !Ref EnvironmentName
+          OS_PLATFORM: !Ref OsPlatform
+          PIPELINE_NAME: !Ref DeploymentPipelineName
+          PIPELINE_PROVIDER: !Ref PipelineProvider
+          SOURCE_AWS_ACCOUNT_ID: !Ref SourceAWSAccountId
